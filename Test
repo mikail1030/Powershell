@@ -1,67 +1,57 @@
-# Define the root path containing the home drives
-$RootPath = "G:\private"
+# ============================================================
+#  CONFIGURATION â€” edit these two lines before running
+# ============================================================
+$AccountsFile = "C:\Path\To\accounts.txt"   # TXT file with one account name per line
+$SearchDirectory = "C:\Path\To\Folders"     # Directory to search for matching folders
+# ============================================================
 
-# Get all top-level subfolders (excluding files)
-$HomeFolders = Get-ChildItem -Path $RootPath -Directory
-
-foreach ($Folder in $HomeFolders) {
-    $FolderName = $Folder.Name
-    $FolderPath = $Folder.FullName
-    
-    Write-Host "`n==================================================" -ForegroundColor Cyan
-    Write-Host "START PROCESSING: $FolderName" -ForegroundColor Cyan
-    Write-Host "Folder Path: $FolderPath"
-    Write-Host "==================================================" -ForegroundColor Cyan
-    
-    # 1. Set the Owner of the folder to the User
-    try {
-        # Create a new NTAccount object for the user
-        $Account = New-Object System.Security.Principal.NTAccount($FolderName)
-        
-        # Get current ACL
-        $Acl = Get-Acl -Path $FolderPath
-        
-        # Set the owner
-        $Acl.SetOwner($Account)
-        Set-Acl -Path $FolderPath -AclObject $Acl
-        Write-Host "[SUCCESS] Set owner to: $FolderName" -ForegroundColor Green
-    }
-    catch {
-        Write-Warning "[ERROR] Failed to set owner for $FolderName. Reason: $_"
-    }
-
-    # 2. Grant Full Control Permissions
-    try {
-        # Refresh ACL object
-        $Acl = Get-Acl -Path $FolderPath
-        
-        # Define the access rule: User, FullControl, Allow inheritance to subfolders and files
-        $InheritanceFlags = [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
-        $PropagationFlags = [System.Security.AccessControl.PropagationFlags]"None"
-        $AccessType = [System.Security.AccessControl.AccessControlType]"Allow"
-        
-        $AccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $FolderName, 
-            "FullControl", 
-            $InheritanceFlags, 
-            $PropagationFlags, 
-            $AccessType
-        )
-        
-        # Add the rule to the ACL and apply it
-        $Acl.SetAccessRule($AccessRule)
-        Set-Acl -Path $FolderPath -AclObject $Acl
-        Write-Host "[SUCCESS] Granted Full Control to: $FolderName" -ForegroundColor Green
-    }
-    catch {
-        Write-Warning "[ERROR] Failed to set Full Control for $FolderName. Reason: $_"
-    }
-
-    # Pause after each user to inspect results
-    Write-Host ""
-    Read-Host -Prompt "Finished processing user '$FolderName'. Press ENTER to proceed to the next folder, or Ctrl+C to abort"
+# --- Validate inputs ---
+if (-not (Test-Path $AccountsFile)) {
+    Write-Error "Accounts file not found: $AccountsFile"
+    exit 1
 }
 
-Write-Host "`n==================================================" -ForegroundColor Cyan
-Write-Host "Script execution completed." -ForegroundColor Cyan
+if (-not (Test-Path $SearchDirectory)) {
+    Write-Error "Search directory not found: $SearchDirectory"
+    exit 1
+}
 
+# --- Load accounts (skip blank lines and trim whitespace) ---
+$accounts = Get-Content $AccountsFile |
+    Where-Object { $_.Trim() -ne "" } |
+    ForEach-Object { $_.Trim() }
+
+if ($accounts.Count -eq 0) {
+    Write-Warning "No accounts found in $AccountsFile. Exiting."
+    exit 0
+}
+
+Write-Host "`nLoaded $($accounts.Count) account(s) from file." -ForegroundColor Cyan
+Write-Host "Scanning: $SearchDirectory`n" -ForegroundColor Cyan
+
+$deleted  = 0
+$notFound = 0
+
+foreach ($account in $accounts) {
+    $folderPath = Join-Path $SearchDirectory $account
+
+    if (Test-Path $folderPath -PathType Container) {
+        try {
+            Remove-Item -Path $folderPath -Recurse -Force
+            Write-Host "[DELETED]   $folderPath" -ForegroundColor Green
+            $deleted++
+        }
+        catch {
+            Write-Host "[ERROR]     $folderPath â€” $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    else {
+        Write-Host "[NOT FOUND] $account" -ForegroundColor Yellow
+        $notFound++
+    }
+}
+
+# --- Summary ---
+Write-Host "`n--- Done ---" -ForegroundColor Cyan
+Write-Host "Deleted  : $deleted folder(s)" -ForegroundColor Green
+Write-Host "Not found: $notFound account(s)" -ForegroundColor Yellow
