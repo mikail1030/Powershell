@@ -1,1 +1,86 @@
-Add-WindowsCapability -Online -Name "Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0"
+# ============================================================
+#  CONFIGURATION â€” edit before running
+# ============================================================
+$InputFile      = "C:\Path\To\accounts.txt"          # TXT file with one account per line
+$OutputEnabled  = "C:\Path\To\Output\enabled_accounts.txt"    # Active/enabled accounts
+$OutputDisabled = "C:\Path\To\Output\disabled_or_notfound.txt" # Disabled or not found
+# ============================================================
+
+# --- Check required module ---
+if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+    Write-Error "ActiveDirectory module not found. Install RSAT or run on a domain controller."
+    exit 1
+}
+Import-Module ActiveDirectory
+
+# --- Validate input file ---
+if (-not (Test-Path $InputFile)) {
+    Write-Error "Input file not found: $InputFile"
+    exit 1
+}
+
+# --- Load accounts ---
+$accounts = Get-Content $InputFile |
+    Where-Object { $_.Trim() -ne "" } |
+    ForEach-Object { $_.Trim() }
+
+if ($accounts.Count -eq 0) {
+    Write-Warning "No accounts found in $InputFile. Exiting."
+    exit 0
+}
+
+Write-Host "`nLoaded $($accounts.Count) account(s). Checking Active Directory...`n" -ForegroundColor Cyan
+
+# --- Initialise output lists ---
+$enabledList  = @()
+$disabledList = @()
+
+# --- Counters ---
+$countEnabled  = 0
+$countDisabled = 0
+$countNotFound = 0
+
+foreach ($account in $accounts) {
+    try {
+        $adUser = Get-ADUser -Identity $account -Properties Enabled, LockedOut -ErrorAction Stop
+
+        if ($adUser.Enabled -eq $true) {
+            $enabledList += $account
+            $countEnabled++
+            Write-Host "[ENABLED]   $account" -ForegroundColor Green
+        }
+        else {
+            $disabledList += "$account  [DISABLED]"
+            $countDisabled++
+            Write-Host "[DISABLED]  $account" -ForegroundColor Yellow
+        }
+    }
+    catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+        # Account does not exist in AD at all
+        $disabledList += "$account  [NOT FOUND IN AD]"
+        $countNotFound++
+        Write-Host "[NOT FOUND] $account" -ForegroundColor Red
+    }
+    catch {
+        # Unexpected error (permissions, connectivity, etc.)
+        $disabledList += "$account  [ERROR: $($_.Exception.Message)]"
+        Write-Host "[ERROR]     $account â€” $($_.Exception.Message)" -ForegroundColor Magenta
+    }
+}
+
+# --- Write output files ---
+# Ensure output directories exist
+$enabledDir  = Split-Path $OutputEnabled
+$disabledDir = Split-Path $OutputDisabled
+if ($enabledDir  -and -not (Test-Path $enabledDir))  { New-Item -ItemType Directory -Path $enabledDir  | Out-Null }
+if ($disabledDir -and -not (Test-Path $disabledDir)) { New-Item -ItemType Directory -Path $disabledDir | Out-Null }
+
+$enabledList  | Out-File -FilePath $OutputEnabled  -Encoding UTF8
+$disabledList | Out-File -FilePath $OutputDisabled -Encoding UTF8
+
+# --- Summary ---
+Write-Host "`n--- Complete ---" -ForegroundColor Cyan
+Write-Host "Enabled (active)      : $countEnabled  â†’ $OutputEnabled"  -ForegroundColor Green
+Write-Host "Disabled              : $countDisabled  â†’ $OutputDisabled" -ForegroundColor Yellow
+Write-Host "Not found in AD       : $countNotFound  â†’ $OutputDisabled" -ForegroundColor Red
+Write-Host "Total accounts checked: $($accounts.Count)`n"             -ForegroundColor Cyan
