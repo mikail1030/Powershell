@@ -1,69 +1,120 @@
 <#
 .SYNOPSIS
-    Recursively sets owner to BUILTIN\Administrators for all folders/subfolders.
+    Compares CA_backup_BCKP (source) against CA_backup (destination) and
+    reports any files/folders that are missing or differ in size in the destination.
 .NOTES
-    Run this from an elevated (Administrator) PowerShell session.
-    The account running this needs SeTakeOwnershipPrivilege (local admins have it by default).
+    Run with sufficient permissions to read both trees.
 #>
 
 param(
-    [string]$RootPath = "D:\CA_Backup",
-    [switch]$IncludeFiles  # also take ownership of files, not just folders
+    [string]$SourcePath      = "G:\CA_backup_BCKP",
+    [string]$DestinationPath = "G:\CA_backup",
+    [string]$ReportPath      = "G:\CA_backup_comparison_report.txt",
+    [switch]$CompareHash     # use file hash instead of size for comparison (slower, more accurate)
 )
 
-if (-not (Test-Path $RootPath)) {
-    Write-Error "Path '$RootPath' does not exist."
+if (-not (Test-Path $SourcePath)) {
+    Write-Error "Source path '$SourcePath' does not exist."
+    return
+}
+if (-not (Test-Path $DestinationPath)) {
+    Write-Error "Destination path '$DestinationPath' does not exist."
     return
 }
 
-$owner = New-Object System.Security.Principal.NTAccount("BUILTIN\Administrators")
+Write-Host "Scanning source: $SourcePath ..." -ForegroundColor Cyan
+$sourceItems = Get-ChildItem -Path $SourcePath -Recurse -Force -ErrorAction SilentlyContinue
 
-function Set-Owner {
-    param([string]$Path)
-    try {
-        $acl = Get-Acl -Path $Path
-        $acl.SetOwner($owner)
-        Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
-        Write-Host "OK: $Path" -ForegroundColor Green
-    }
-    catch {
-        Write-Warning "Failed (Set-Acl) on $Path - trying takeown.exe fallback. Error: $($_.Exception.Message)"
-        try {
-            $arg = if ((Get-Item $Path) -is [System.IO.DirectoryInfo]) { "/D Y" } else { "" }
-            takeown.exe /F "$Path" /A $arg | Out-Null
-            $acl = Get-Acl -Path $Path
-            $acl.SetOwner($owner)
-            Set-Acl -Path $Path -AclObject $acl
-            Write-Host "OK (via takeown): $Path" -ForegroundColor Yellow
-        }
-        catch {
-            Write-Error "FAILED: $Path - $($_.Exception.Message)"
-        }
-    }
+Write-Host "Scanning destination: $DestinationPath ..." -ForegroundColor Cyan
+# Build a lookup of destination items by their relative path for fast comparison
+$destItems = Get-ChildItem -Path $DestinationPath -Recurse -Force -ErrorAction SilentlyContinue
+$destLookup = @{}
+foreach ($d in $destItems) {
+    $relPath = $d.FullName.Substring($DestinationPath.Length).TrimStart('\')
+    $destLookup[$relPath] = $d
 }
 
-# Build the full list first so we can show progress (X of Y)
-Write-Host "Scanning '$RootPath' for folders$(if ($IncludeFiles) { ' and files' })..." -ForegroundColor Cyan
+$missing   = New-Object System.Collections.Generic.List[string]
+$different = New-Object System.Collections.Generic.List[string]
+$okCount   = 0
+$total     = $sourceItems.Count
+$counter   = 0
 
-$folders = Get-ChildItem -Path $RootPath -Recurse -Force -ErrorAction SilentlyContinue -Directory
-$allItems = @($RootPath) + $folders.FullName
+Write-Host "Comparing $total item(s)...`n" -ForegroundColor Cyan
 
-if ($IncludeFiles) {
-    $files = Get-ChildItem -Path $RootPath -Recurse -Force -ErrorAction SilentlyContinue -File
-    $allItems += $files.FullName
-}
-
-$total = $allItems.Count
-Write-Host "Found $total item(s) to process.`n" -ForegroundColor Cyan
-
-$counter = 0
-foreach ($item in $allItems) {
+foreach ($item in $sourceItems) {
     $counter++
-    Write-Host "`n[$counter / $total] Processing: $item" -ForegroundColor Cyan
+    if ($counter % 200 -eq 0) {
+        Write-Host "Progress: $counter / $total" -ForegroundColor DarkGray
+    }
 
-    Set-Owner -Path $item
+    $relPath = $item.FullName.Substring($SourcePath.Length).TrimStart('\')
 
-    Read-Host "Press Enter to continue to the next item"
+    if (-not $destLookup.ContainsKey($relPath)) {
+        $missing.Add($relPath)
+        continue
+    }
+
+    # If it's a file, optionally verify it actually matches (not just "exists")
+    if (-not $item.PSIsContainer) {
+        $destFile = $destLookup[$relPath]
+
+        if ($destFile.PSIsContainer) {
+            # Name collision: source is a file, destination has a folder with same relative path
+            $different.Add("$relPath  (source=FILE, destination=FOLDER)")
+            continue
+        }
+
+        if ($CompareHash) {
+            $srcHash  = (Get-FileHash -Path $item.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+            $destHash = (Get-FileHash -Path $destFile.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+            if ($srcHash -ne $destHash) {
+                $different.Add("$relPath  (hash mismatch)")
+                continue
+            }
+        }
+        else {
+            if ($item.Length -ne $destFile.Length) {
+                $different.Add("$relPath  (size mismatch: source=$($item.Length) bytes, destination=$($destFile.Length) bytes)")
+                continue
+            }
+        }
+    }
+
+    $okCount++
 }
 
-Write-Host "`nDone. Processed $counter item(s)." -ForegroundColor Cyan
+# Build report
+$reportLines = New-Object System.Collections.Generic.List[string]
+$reportLines.Add("CA_backup comparison report")
+$reportLines.Add("Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+$reportLines.Add("Source:      $SourcePath")
+$reportLines.Add("Destination: $DestinationPath")
+$reportLines.Add("Comparison mode: $(if ($CompareHash) { 'SHA256 hash' } else { 'file size' })")
+$reportLines.Add("")
+$reportLines.Add("Total items in source: $total")
+$reportLines.Add("OK (present and matching): $okCount")
+$reportLines.Add("Missing in destination:    $($missing.Count)")
+$reportLines.Add("Present but different:     $($different.Count)")
+$reportLines.Add("")
+$reportLines.Add("===== MISSING IN DESTINATION =====")
+if ($missing.Count -eq 0) {
+    $reportLines.Add("(none)")
+}
+else {
+    $reportLines.AddRange($missing)
+}
+$reportLines.Add("")
+$reportLines.Add("===== PRESENT BUT DIFFERENT =====")
+if ($different.Count -eq 0) {
+    $reportLines.Add("(none)")
+}
+else {
+    $reportLines.AddRange($different)
+}
+
+$reportLines | Out-File -FilePath $ReportPath -Encoding UTF8
+
+Write-Host "`nDone." -ForegroundColor Cyan
+Write-Host "OK: $okCount | Missing: $($missing.Count) | Different: $($different.Count)" -ForegroundColor Yellow
+Write-Host "Report written to: $ReportPath" -ForegroundColor Green
