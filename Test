@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Recursively sets owner to BUILTIN\Administrators for all folders/subfolders.
+    Recursively sets owner to BUILTIN\Administrators and grants Full Control
+    to a custom list of accounts on all folders/subfolders.
 .NOTES
     Run this from an elevated (Administrator) PowerShell session.
     The account running this needs SeTakeOwnershipPrivilege (local admins have it by default).
@@ -8,8 +9,17 @@
 
 param(
     [string]$RootPath = "D:\CA_Backup",
-    [switch]$IncludeFiles  # also take ownership of files, not just folders
+    [switch]$IncludeFiles  # also take ownership / set ACL on files, not just folders
 )
+
+# ---- FILL THIS IN: accounts to grant Full Control ----
+# Use DOMAIN\User, COMPUTER\User, or BUILTIN\Group format
+$AccountsToGrantFullControl = @(
+    "BUILTIN\Administrators",
+    "DOMAIN\YourServiceAccount",
+    "DOMAIN\SomeUserOrGroup"
+)
+# --------------------------------------------------------
 
 if (-not (Test-Path $RootPath)) {
     Write-Error "Path '$RootPath' does not exist."
@@ -24,7 +34,8 @@ function Set-Owner {
         $acl = Get-Acl -Path $Path
         $acl.SetOwner($owner)
         Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
-        Write-Host "OK: $Path" -ForegroundColor Green
+        Write-Host "Owner OK: $Path" -ForegroundColor Green
+        return $true
     }
     catch {
         Write-Warning "Failed (Set-Acl) on $Path - trying takeown.exe fallback. Error: $($_.Exception.Message)"
@@ -34,11 +45,54 @@ function Set-Owner {
             $acl = Get-Acl -Path $Path
             $acl.SetOwner($owner)
             Set-Acl -Path $Path -AclObject $acl
-            Write-Host "OK (via takeown): $Path" -ForegroundColor Yellow
+            Write-Host "Owner OK (via takeown): $Path" -ForegroundColor Yellow
+            return $true
         }
         catch {
-            Write-Error "FAILED: $Path - $($_.Exception.Message)"
+            Write-Error "FAILED to set owner: $Path - $($_.Exception.Message)"
+            return $false
         }
+    }
+}
+
+function Add-FullControlAcl {
+    param([string]$Path)
+
+    $isDirectory = (Get-Item $Path) -is [System.IO.DirectoryInfo]
+
+    try {
+        $acl = Get-Acl -Path $Path
+
+        foreach ($account in $AccountsToGrantFullControl) {
+            $identity = New-Object System.Security.Principal.NTAccount($account)
+
+            if ($isDirectory) {
+                # Apply to this folder, subfolders, and files
+                $inheritFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+                                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+                $propFlags = [System.Security.AccessControl.PropagationFlags]::None
+            }
+            else {
+                $inheritFlags = [System.Security.AccessControl.InheritanceFlags]::None
+                $propFlags = [System.Security.AccessControl.PropagationFlags]::None
+            }
+
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $identity,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                $inheritFlags,
+                $propFlags,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+
+            $acl.AddAccessRule($rule)
+        }
+
+        Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
+        Write-Host "ACL OK: $Path" -ForegroundColor Green
+    }
+    catch {
+        Write-Error "FAILED to set ACL: $Path - $($_.Exception.Message)"
     }
 }
 
@@ -61,7 +115,10 @@ foreach ($item in $allItems) {
     $counter++
     Write-Host "`n[$counter / $total] Processing: $item" -ForegroundColor Cyan
 
-    Set-Owner -Path $item
+    $ownerSet = Set-Owner -Path $item
+    if ($ownerSet) {
+        Add-FullControlAcl -Path $item
+    }
 
     Read-Host "Press Enter to continue to the next item"
 }
