@@ -24,18 +24,17 @@ function Set-Owner {
         $acl = Get-Acl -Path $Path
         $acl.SetOwner($owner)
         Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
-        Write-Host "OK: $Path"
+        Write-Host "OK: $Path" -ForegroundColor Green
     }
     catch {
         Write-Warning "Failed (Set-Acl) on $Path - trying takeown.exe fallback. Error: $($_.Exception.Message)"
-        # Fallback for cases where Set-Acl can't take ownership due to broken ACL chains
         try {
             $arg = if ((Get-Item $Path) -is [System.IO.DirectoryInfo]) { "/D Y" } else { "" }
             takeown.exe /F "$Path" /A $arg | Out-Null
             $acl = Get-Acl -Path $Path
             $acl.SetOwner($owner)
             Set-Acl -Path $Path -AclObject $acl
-            Write-Host "OK (via takeown): $Path"
+            Write-Host "OK (via takeown): $Path" -ForegroundColor Yellow
         }
         catch {
             Write-Error "FAILED: $Path - $($_.Exception.Message)"
@@ -43,22 +42,28 @@ function Set-Owner {
     }
 }
 
-# Set owner on the root itself
-Set-Owner -Path $RootPath
+# Build the full list first so we can show progress (X of Y)
+Write-Host "Scanning '$RootPath' for folders$(if ($IncludeFiles) { ' and files' })..." -ForegroundColor Cyan
 
-# Get all folders (and optionally files), deepest first is not required for owner-setting,
-# but we process top-down which works fine for ownership.
-$items = Get-ChildItem -Path $RootPath -Recurse -Force -ErrorAction SilentlyContinue -Directory
-
-foreach ($folder in $items) {
-    Set-Owner -Path $folder.FullName
-}
+$folders = Get-ChildItem -Path $RootPath -Recurse -Force -ErrorAction SilentlyContinue -Directory
+$allItems = @($RootPath) + $folders.FullName
 
 if ($IncludeFiles) {
     $files = Get-ChildItem -Path $RootPath -Recurse -Force -ErrorAction SilentlyContinue -File
-    foreach ($file in $files) {
-        Set-Owner -Path $file.FullName
-    }
+    $allItems += $files.FullName
 }
 
-Write-Host "`nDone."
+$total = $allItems.Count
+Write-Host "Found $total item(s) to process.`n" -ForegroundColor Cyan
+
+$counter = 0
+foreach ($item in $allItems) {
+    $counter++
+    Write-Host "`n[$counter / $total] Processing: $item" -ForegroundColor Cyan
+
+    Set-Owner -Path $item
+
+    Read-Host "Press Enter to continue to the next item"
+}
+
+Write-Host "`nDone. Processed $counter item(s)." -ForegroundColor Cyan
